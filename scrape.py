@@ -1,20 +1,23 @@
-"""Scrape CVPR 2026 papers from the CVF open-access site.
+"""Scrape the CVPR 2026 papers from the CVF open-access site.
 
-Produces data/cvpr_2026_papers.json: a list of
-{title, authors, abstract, pdf_link} in listing order.
+Writes config.PAPERS_PATH: a list of {id, title, authors, abstract, pdf_link, forum_link,
+keywords, tldr, area, decision, track, site} in listing order. CVF publishes no keywords,
+TL;DR, primary area or presentation type, so those fields stay empty and decision is "other".
 """
 import json
+import os
+import re
 import sys
-import time
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
-BASE_URL = "https://openaccess.thecvf.com"
-LISTING_URL = f"{BASE_URL}/CVPR2026?day=all"
-OUTPUT_PATH = "data/cvpr_2026_papers.json"
+import config
+
 MAX_WORKERS = 16
 MAX_RETRIES = 3
 
@@ -29,47 +32,65 @@ def get_session():
     return session
 
 
+def paper_id(url):
+    """'.../html/Xiao_Foo_CVPR_2026_paper.html' or '.../papers/Xiao_Foo_CVPR_2026_paper.pdf'
+    -> 'Xiao_Foo_CVPR_2026'."""
+    return re.sub(r"_paper\.(html|pdf)$", "", url.rsplit("/", 1)[-1])
+
+
+def page_url(pdf_link):
+    """PDF link -> the paper's abstract page on the same site."""
+    return re.sub(r"/papers/(.*)\.pdf$", r"/html/\1.html", pdf_link)
+
+
+def to_record(title, authors, abstract, pdf_link):
+    return {
+        "id": paper_id(pdf_link),
+        "title": " ".join(title.split()),
+        "authors": " ".join(authors.split()),
+        "abstract": " ".join(abstract.split()),
+        "pdf_link": pdf_link,
+        "forum_link": page_url(pdf_link),
+        "keywords": [],
+        "tldr": "",
+        "area": "",
+        "decision": "other",
+        "track": "",
+        "site": "",
+    }
+
+
 def fetch_listing_hrefs():
-    resp = requests.get(LISTING_URL, timeout=30)
+    resp = requests.get(config.LISTING_URL, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
-    hrefs = [a["href"] for a in soup.select(".ptitle a")]
-    return hrefs
+    return [a["href"] for a in soup.select(".ptitle a")]
 
 
-def parse_paper(url):
-    session = get_session()
-    resp = session.get(url, timeout=30)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    title = soup.find("div", id="papertitle").text.strip()
-    abstract = soup.find("div", id="abstract").text.strip()
+def parse_paper_html(html, url):
+    soup = BeautifulSoup(html, "html.parser")
+    title = soup.find("div", id="papertitle").text
+    abstract = soup.find("div", id="abstract").text
 
     authors_div = soup.find("div", id="authors")
     authors_tag = authors_div.find("i") if authors_div else None
-    authors = authors_tag.text.strip() if authors_tag else authors_div.text.strip()
+    authors = authors_tag.text if authors_tag else authors_div.text
 
     pdf_a = soup.find("a", string="pdf")
     if pdf_a is None:
         pdf_a = soup.find("a", href=lambda h: h and h.endswith(".pdf"))
-    pdf_link = BASE_URL + pdf_a["href"]
-
-    return {
-        "title": title,
-        "authors": authors,
-        "abstract": abstract,
-        "pdf_link": pdf_link,
-    }
+    return to_record(title, authors, abstract, urljoin(url, pdf_a["href"]))
 
 
 def fetch_with_retry(href):
-    url = BASE_URL + href
+    url = config.CVF_URL + href
     delay = 1.0
     last_exc = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            return url, parse_paper(url)
+            resp = get_session().get(url, timeout=30)
+            resp.raise_for_status()
+            return url, parse_paper_html(resp.text, url)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt < MAX_RETRIES:
@@ -79,7 +100,7 @@ def fetch_with_retry(href):
 
 
 def main():
-    print(f"Fetching listing: {LISTING_URL}")
+    print(f"Fetching listing: {config.LISTING_URL}")
     hrefs = fetch_listing_hrefs()
     n_expected = len(hrefs)
     print(f"Found {n_expected} paper links in listing.")
@@ -109,22 +130,19 @@ def main():
             print(f"  {url}: {err}")
         sys.exit(1)
 
-    # Preserve listing order.
+    # Listing order, not id order: the committed embeddings follow this order.
     papers = [results_by_href[href] for href in hrefs]
 
-    assert len(papers) == n_expected, (
-        f"parsed paper count {len(papers)} != listing href count {n_expected}"
-    )
+    assert len({p["id"] for p in papers}) == len(papers), "duplicate paper ids"
     for p in papers:
         assert p["title"], f"empty title for paper: {p}"
         assert p["abstract"], f"empty abstract for paper: {p['title']!r}"
 
-    import os
-    os.makedirs("data", exist_ok=True)
-    with open(OUTPUT_PATH, "w") as f:
-        json.dump(papers, f)
+    os.makedirs(os.path.dirname(config.PAPERS_PATH), exist_ok=True)
+    with open(config.PAPERS_PATH, "w") as f:
+        json.dump(papers, f, ensure_ascii=False)
 
-    print(f"Wrote {len(papers)} papers to {OUTPUT_PATH}")
+    print(f"Wrote {len(papers)} papers to {config.PAPERS_PATH}")
 
 
 if __name__ == "__main__":

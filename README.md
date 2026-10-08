@@ -30,6 +30,15 @@ characteristic terms. Grey points are papers that fit no cluster.
   [`?q=diffusion`](https://flecomet.github.io/cvpr-explorer/?q=diffusion) is a shareable link.
 - **Click** a point to show the title, authors and abstract in the side panel, with a link to the PDF.
 - **Scroll and drag** to zoom and pan.
+- **Topic names** are drawn on the map, and more appear as you zoom in.
+- **Topics list**: click a topic to zoom to it and list its papers.
+- **Paper panel** also shows the TL;DR, keywords (click one to search), and the six most
+  similar papers.
+- **Saved list**: keep papers in the browser and export them as CSV or Markdown.
+- **Shareable URLs** store the paper, search, topic and colour mode, such as `?p=<paper id>`.
+- **Light and dark themes**, keyboard shortcuts (`/` to search, `Esc` to clear), and a layout
+  that works on a phone.
+- **Fast start**: the map loads first, and abstracts load afterwards.
 
 <img src="docs/img/panel.png" alt="Side panel with the title, authors, PDF button and abstract of a selected paper" width="300">
 
@@ -39,19 +48,19 @@ cluster is twice as far away as that one" as unreliable.
 
 ## Largest topics
 
-The pipeline finds 32 topic clusters. A further 1477 papers (36%) belong to none of them.
+The pipeline finds 32 topic clusters. A further 1477 papers (36.3%) belong to none of them.
 Labels are generated automatically from the abstracts.
 
 | Papers | Cluster label |
 |-------:|---------------|
-| 277 | 3d · point · view |
-| 197 | medical · clinical · image |
-| 176 | attacks · attack · adversarial |
-| 149 | gaussian · 3dgs · 3d |
-| 134 | generation · diffusion · training |
-| 122 | action · vla · robot |
-| 114 | reasoning · visual · multimodal |
-| 112 | 3d · generation · mesh |
+| 277 | lidar · point cloud · occupancy |
+| 197 | medical · clinical · brain |
+| 176 | attacks · adversarial · forgery |
+| 149 | splatting · 3dgs · 3d gaussian |
+| 134 | acceleration · var · video generation |
+| 122 | vla · robot · language action |
+| 114 | mllms · multimodal reasoning · answer |
+| 112 | mesh · 4d · 3d generation |
 
 ## How it works
 
@@ -61,14 +70,14 @@ The pipeline is offline and the site is static.
 |------|--------|--------|
 | Scrape titles, authors, abstracts, PDF links | `scrape.py` | `data/cvpr_2026_papers.json` |
 | Embed abstracts with SPECTER2 | `embed.py` | `data/cvpr_2026_specter2.npy` |
-| UMAP to 2D, HDBSCAN clusters, c-TF-IDF labels | `layout.py` | `data/cvpr_2026_layout.json` |
-| Merge into the site payload | `build_site.py` | `site/data.json` |
+| UMAP to 2D, HDBSCAN clusters, c-TF-IDF labels, nearest neighbours | `layout.py` | `data/cvpr_2026_layout.json` |
+| Merge into the site payload | `build_site.py` | `site/data.json`, `site/details.json`, `site/index.html` |
 
 `layout.py` runs UMAP on the cosine-normalised embeddings, then HDBSCAN, a density-based
 clustering method, on the 2D coordinates. Cluster labels use c-TF-IDF: terms score high when
 they are frequent in one cluster and rare in the others.
 
-`site/index.html` renders the payload client-side with plotly.js. No backend and no API keys
+`site/index.html` is rendered from `templates/index.html`, and it draws the payload client-side with plotly.js. No backend and no API keys
 are needed at serve time.
 
 ## Run the pipeline
@@ -121,6 +130,14 @@ publishes `site/` to GitHub Pages.
 - [x] Keyword search across titles and abstracts
 - [ ] Mark papers with released code
 - [ ] Add more conferences and years back
+
+## Shared template
+
+`build_site.py`, `embed.py`, `layout.py`, `templates/index.html`, the tests for them and
+the CI workflows are copied from
+[neurips-explorer](https://github.com/flecomet/neurips-explorer) by its
+`sync_template.py`. Edit them there and sync. `config.py`, `scrape.py` and this README
+belong to this repository.
 
 ## Credits
 

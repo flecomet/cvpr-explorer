@@ -1,26 +1,28 @@
-"""Compute SPECTER2 embeddings for CVPR 2026 papers.
+"""Compute SPECTER2 embeddings for the papers.
 
-Reads data/cvpr_2026_papers.json, writes data/cvpr_2026_specter2.npy
-as a [len(papers), 768] float32 array (CLS pooled, title + abstract).
+Reads config.PAPERS_PATH, writes config.EMBEDDINGS_PATH as a
+[n_papers, 768] float16 array (CLS pooled, title + abstract). float16 halves the
+file size; cosine similarity is unaffected at that precision. Runs on CPU in
+roughly 15-30 minutes for ~6000 papers, or in a couple of minutes on a GPU.
 """
 import json
 
 import numpy as np
 import torch
-from transformers import AutoTokenizer
 from adapters import AutoAdapterModel
+from transformers import AutoTokenizer
 
-PAPERS_PATH = "data/cvpr_2026_papers.json"
-OUTPUT_PATH = "data/cvpr_2026_specter2.npy"
+import config
+
 BATCH_SIZE = 32
 MAX_LENGTH = 512
 
 
 def main():
-    with open(PAPERS_PATH, "r") as f:
+    with open(config.PAPERS_PATH) as f:
         papers = json.load(f)
     n_papers = len(papers)
-    print(f"Loaded {n_papers} papers from {PAPERS_PATH}")
+    print(f"Loaded {n_papers} papers from {config.PAPERS_PATH}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_fp16 = device.type == "cuda"
@@ -28,45 +30,36 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained("allenai/specter2_base")
     model = AutoAdapterModel.from_pretrained("allenai/specter2_base")
-    model.load_adapter(
-        "allenai/specter2", source="hf", load_as="proximity", set_active=True
-    )
+    model.load_adapter("allenai/specter2", source="hf", load_as="proximity", set_active=True)
     model.to(device)
     model.eval()
     if use_fp16:
         model.half()
 
-    texts = [
-        p["title"] + tokenizer.sep_token + p["abstract"] for p in papers
-    ]
+    texts = [p["title"] + tokenizer.sep_token + p["abstract"] for p in papers]
 
-    all_embeddings = []
+    chunks = []
     with torch.no_grad():
         for start in range(0, n_papers, BATCH_SIZE):
-            batch_texts = texts[start : start + BATCH_SIZE]
             inputs = tokenizer(
-                batch_texts,
+                texts[start : start + BATCH_SIZE],
                 padding=True,
                 truncation=True,
                 max_length=MAX_LENGTH,
                 return_tensors="pt",
             ).to(device)
-            outputs = model(**inputs)
-            cls = outputs.last_hidden_state[:, 0, :]
-            all_embeddings.append(cls.float().cpu().numpy())
+            cls = model(**inputs).last_hidden_state[:, 0, :]
+            chunks.append(cls.float().cpu().numpy())
             done = min(start + BATCH_SIZE, n_papers)
             if done % (BATCH_SIZE * 10) == 0 or done == n_papers:
                 print(f"  embedded {done}/{n_papers}")
 
-    embeddings = np.concatenate(all_embeddings, axis=0).astype(np.float32)
+    embeddings = np.concatenate(chunks, axis=0)
+    assert embeddings.shape == (n_papers, 768), f"unexpected shape {embeddings.shape}"
+    assert np.isfinite(embeddings).all(), "embeddings contain NaN or inf"
 
-    assert embeddings.shape == (n_papers, 768), (
-        f"expected shape ({n_papers}, 768), got {embeddings.shape}"
-    )
-    assert not np.isnan(embeddings).any(), "embeddings contain NaN"
-
-    np.save(OUTPUT_PATH, embeddings)
-    print(f"Wrote {embeddings.shape} embeddings to {OUTPUT_PATH}")
+    np.save(config.EMBEDDINGS_PATH, embeddings.astype(np.float16))
+    print(f"Wrote {embeddings.shape} embeddings to {config.EMBEDDINGS_PATH}")
 
 
 if __name__ == "__main__":

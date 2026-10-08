@@ -22,11 +22,29 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # Until the "Refresh data" workflow has run once there is nothing to publish.
+      - name: Check for pipeline data
+        id: check
+        run: |
+          layout=$(python3 -c 'import config; print(config.LAYOUT_PATH)')
+          if [ -f "$layout" ]; then
+            echo "has_data=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No $layout yet. Run the pipeline or the 'Refresh data' workflow first."
+          fi
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.has_data == 'true'
+        with:
+          python-version: "3.12"
       - name: Build site payload
+        if: steps.check.outputs.has_data == 'true'
         run: python build_site.py
       - uses: actions/configure-pages@v5
+        if: steps.check.outputs.has_data == 'true'
       - uses: actions/upload-pages-artifact@v3
+        if: steps.check.outputs.has_data == 'true'
         with:
           path: site
       - id: deployment
+        if: steps.check.outputs.has_data == 'true'
         uses: actions/deploy-pages@v4

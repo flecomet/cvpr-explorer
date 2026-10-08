@@ -1,2 +1,6 @@
 .venv/
 site/data.json
+site/details.json
+site/index.html
+__pycache__/
+.pytest_cache/

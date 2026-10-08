@@ -1,117 +1,137 @@
-"""Compute a 2D UMAP layout and HDBSCAN clusters for CVPR 2026 papers.
+"""2D UMAP layout, HDBSCAN clusters, topic labels and nearest neighbours.
 
-Reads data/cvpr_2026_papers.json and data/cvpr_2026_specter2.npy,
-writes data/cvpr_2026_layout.json:
-    {"clusters": {id: name}, "points": [{x, y, cluster}]}
-`points` is in the same order as cvpr_2026_papers.json.
+Reads config.PAPERS_PATH and config.EMBEDDINGS_PATH, writes config.LAYOUT_PATH:
+    {"clusters": {id: name}, "points": [{x, y, cluster}], "neighbors": [[idx, ...]]}
+`points` and `neighbors` follow the order of the papers file. Cluster -1 holds
+papers HDBSCAN left unassigned.
 """
+import argparse
 import json
 
 import numpy as np
-import umap
-from sklearn.cluster import HDBSCAN
-from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, TfidfVectorizer
 
-PAPERS_PATH = "data/cvpr_2026_papers.json"
-EMBEDDINGS_PATH = "data/cvpr_2026_specter2.npy"
-OUTPUT_PATH = "data/cvpr_2026_layout.json"
+import config
+
+N_NEIGHBORS = 6
+LABEL_TERMS = 3
 
 DOMAIN_STOPWORDS = [
-    "propose",
-    "proposed",
-    "method",
-    "methods",
-    "paper",
-    "results",
-    "novel",
-    "approach",
-    "task",
-    "tasks",
-    "model",
-    "models",
-    "performance",
-    "state",
-    "art",
+    "propose", "proposed", "method", "methods", "paper", "results", "novel",
+    "approach", "task", "tasks", "model", "models", "performance", "state",
+    "art", "show", "demonstrate", "experiments", "existing", "based", "using",
+    "data", "learning", "framework", "outperforms", "extensive",
 ]
 
 
-def main():
-    with open(PAPERS_PATH, "r") as f:
-        papers = json.load(f)
-    n_papers = len(papers)
-    print(f"Loaded {n_papers} papers from {PAPERS_PATH}")
-
-    embeddings = np.load(EMBEDDINGS_PATH)
-    assert embeddings.shape[0] == n_papers, (
-        f"embeddings rows {embeddings.shape[0]} != paper count {n_papers}"
-    )
-
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+def normalize(embeddings):
+    emb = embeddings.astype(np.float32)
+    norms = np.linalg.norm(emb, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
-    normalized = embeddings / norms
+    return emb / norms
+
+
+def nearest_neighbors(normalized, k=N_NEIGHBORS, chunk=1024):
+    """Top-k cosine neighbours of every row (self excluded), most similar first."""
+    n = len(normalized)
+    k = min(k, n - 1)
+    out = np.empty((n, k), dtype=np.int32)
+    for start in range(0, n, chunk):
+        sims = normalized[start : start + chunk] @ normalized.T
+        sims[np.arange(len(sims)), np.arange(start, start + len(sims))] = -np.inf
+        top = np.argpartition(-sims, k - 1, axis=1)[:, :k]
+        order = np.argsort(-np.take_along_axis(sims, top, axis=1), axis=1)
+        out[start : start + chunk] = np.take_along_axis(top, order, axis=1)
+    return out
+
+
+def pick_terms(ranked_terms, n=LABEL_TERMS):
+    """Take the top terms, skipping any that contain or are contained in a chosen one
+    ("diffusion" vs "diffusion language"), so a label does not repeat itself."""
+    chosen = []
+    for term in ranked_terms:
+        if any(term in c or c in term for c in chosen):
+            continue
+        chosen.append(term)
+        if len(chosen) == n:
+            break
+    return chosen
+
+
+def cluster_labels(texts, labels):
+    """Name each real cluster by its highest TF-IDF terms, with all of a cluster's
+    texts treated as one document so terms are scored against the other clusters."""
+    real = sorted(set(labels.tolist()) - {-1})
+    names = {}
+    if real:
+        docs = [" ".join(texts[i] for i in np.where(labels == c)[0]) for c in real]
+        vec = TfidfVectorizer(
+            ngram_range=(1, 2),
+            stop_words=list(ENGLISH_STOP_WORDS) + DOMAIN_STOPWORDS,
+            # Drop terms found in most clusters, but only when there are enough
+            # clusters for that to be meaningful (max_df needs >= 1 document).
+            max_df=0.5 if len(real) >= 4 else 1.0,
+        )
+        tfidf = vec.fit_transform(docs)
+        terms = np.array(vec.get_feature_names_out())
+        for row, c in enumerate(real):
+            scores = tfidf[row].toarray().ravel()
+            ranked = terms[scores.argsort()[::-1][:20]]
+            names[c] = " · ".join(pick_terms(list(ranked)))
+    if -1 in labels:
+        names[-1] = "unclustered"
+    return names
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--min-cluster-size", type=int, default=25)
+    ap.add_argument("--n-neighbors", type=int, default=15, help="UMAP neighbourhood size")
+    args = ap.parse_args()
+
+    import umap  # imported here so the helpers above can be tested without numba
+    from sklearn.cluster import HDBSCAN
+
+    with open(config.PAPERS_PATH) as f:
+        papers = json.load(f)
+    embeddings = np.load(config.EMBEDDINGS_PATH)
+    assert len(embeddings) == len(papers), (
+        f"{len(embeddings)} embeddings != {len(papers)} papers"
+    )
+    normalized = normalize(embeddings)
 
     print("Running UMAP...")
-    reducer = umap.UMAP(
-        n_components=2,
-        n_neighbors=15,
-        min_dist=0.05,
-        metric="cosine",
-        random_state=42,
-    )
-    xy = reducer.fit_transform(normalized)
+    xy = umap.UMAP(
+        n_components=2, n_neighbors=args.n_neighbors, min_dist=0.05,
+        metric="cosine", random_state=42,
+    ).fit_transform(normalized)
 
     print("Running HDBSCAN...")
-    clusterer = HDBSCAN(min_cluster_size=25)
-    labels = clusterer.fit_predict(xy)
+    labels = HDBSCAN(min_cluster_size=args.min_cluster_size).fit_predict(xy)
 
-    unique_labels = sorted(set(labels.tolist()))
-    print(f"Found {len(unique_labels)} clusters (including noise if present).")
-
-    stop_words = list(ENGLISH_STOP_WORDS) + DOMAIN_STOPWORDS
-
-    abstracts = [p["abstract"] for p in papers]
-    cluster_docs = {}
-    cluster_sizes = {}
-    for label in unique_labels:
-        idxs = np.where(labels == label)[0]
-        cluster_sizes[label] = len(idxs)
-        cluster_docs[label] = " ".join(abstracts[i] for i in idxs)
-
-    real_labels = [l for l in unique_labels if l != -1]
-    cluster_names = {}
-    if real_labels:
-        docs = [cluster_docs[l] for l in real_labels]
-        vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words=stop_words)
-        tfidf = vectorizer.fit_transform(docs)
-        terms = np.array(vectorizer.get_feature_names_out())
-        for row_idx, label in enumerate(real_labels):
-            row = tfidf[row_idx].toarray().ravel()
-            top_idx = row.argsort()[::-1][:3]
-            top_terms = [terms[i] for i in top_idx]
-            cluster_names[label] = " · ".join(top_terms)
-
-    if -1 in unique_labels:
-        cluster_names[-1] = "unclustered"
-
-    points = [
-        {"x": float(xy[i, 0]), "y": float(xy[i, 1]), "cluster": int(labels[i])}
-        for i in range(n_papers)
+    texts = [
+        " ".join([p["title"], p["abstract"], " ".join(p.get("keywords", []))])
+        for p in papers
     ]
+    names = cluster_labels(texts, labels)
+    neighbors = nearest_neighbors(normalized)
 
-    clusters_out = {str(label): cluster_names[label] for label in unique_labels}
+    out = {
+        "clusters": {str(c): names[c] for c in sorted(names)},
+        "points": [
+            {"x": float(xy[i, 0]), "y": float(xy[i, 1]), "cluster": int(labels[i])}
+            for i in range(len(papers))
+        ],
+        "neighbors": neighbors.tolist(),
+    }
+    with open(config.LAYOUT_PATH, "w") as f:
+        json.dump(out, f)
 
-    assert len(points) == n_papers, (
-        f"point count {len(points)} != paper count {n_papers}"
-    )
-
-    with open(OUTPUT_PATH, "w") as f:
-        json.dump({"clusters": clusters_out, "points": points}, f)
-
-    print(f"\nCluster list ({len(unique_labels)} clusters):")
-    for label in sorted(unique_labels, key=lambda l: (l == -1, -cluster_sizes[l])):
-        print(f"  [{label}] size={cluster_sizes[label]:4d}  {cluster_names[label]}")
-
-    print(f"\nWrote layout for {len(points)} points to {OUTPUT_PATH}")
+    sizes = {c: int((labels == c).sum()) for c in names}
+    print(f"\n{len(names)} clusters (including unclustered, if any):")
+    for c in sorted(names, key=lambda c: (c == -1, -sizes[c])):
+        print(f"  [{c:3d}] n={sizes[c]:4d}  {names[c]}")
+    print(f"\nWrote layout for {len(papers)} papers to {config.LAYOUT_PATH}")
 
 
 if __name__ == "__main__":

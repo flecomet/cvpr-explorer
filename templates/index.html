@@ -60,7 +60,8 @@
   }
   #panel h2 { font-size: 16px; margin: 0 0 8px; line-height: 1.35; }
   #panel h3 { font-size: 13px; margin: 18px 0 6px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
-  .authors { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .authors { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 12px; }
+  .authors button { font-size: 12px; padding: 3px 8px; border-radius: 999px; color: var(--accent); background: var(--chip); }
   .abstract { color: var(--text); opacity: .85; }
   .tldr { font-style: italic; margin: 0 0 12px; }
   .hint { color: var(--faint); }
@@ -74,6 +75,7 @@
   .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--chip); color: var(--muted); }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .chips button { font-size: 12px; padding: 2px 9px; border-radius: 10px; background: var(--chip); border-color: transparent; color: var(--muted); }
+  .author-suggestions { max-height: 200px; overflow-y: auto; }
   ul.list { list-style: none; margin: 0; padding: 0; }
   ul.list li { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; margin: 0 -8px; border-radius: 6px; cursor: pointer; }
   ul.list li:hover { background: var(--hover); }
@@ -97,6 +99,8 @@
 <header>
   <h1>@@NAME@@ <small>Explorer</small></h1>
   <input id="search" type="search" placeholder="Search titles, authors, abstracts…  ( / )" autocomplete="off" disabled aria-label="Search papers">
+  <label class="hint" for="search-scope">Search in</label>
+  <select id="search-scope"><option value="all">All fields</option><option value="authors">Authors</option></select>
   <span id="hits" aria-live="polite"></span>
   <label class="hint" for="colorby">Color by</label>
   <select id="colorby">
@@ -137,6 +141,12 @@ let sizes = [];          // current marker size per paper
 let selectedPaper = -1;
 let activeCluster = null;      // cluster id being browsed, or null
 let query = "";
+let searchScope = "all";
+let selectedAuthors = [];
+let authorIndex = new Map();
+let detailsError = null;
+let searchTimer;
+let restoringUrl = false;
 let saved = loadSaved();
 let panelView = "home";
 
@@ -222,6 +232,7 @@ function computeStyle(mode) {
 function recolor() {
   computeStyle($("colorby").value);
   Plotly.restyle(plotEl, { "marker.color": [colors], "marker.size": [sizes] }, [0]);
+  refreshHighlight();
 }
 
 // ---------- plot ----------
@@ -315,7 +326,13 @@ function refreshHighlight() {
   if (matchSet && activeCluster !== null) idx = [...matchSet].filter(i => D.c[i] === activeCluster);
   else if (matchSet) idx = [...matchSet];
   else if (activeCluster !== null) idx = clusterMembers(activeCluster);
-  Plotly.restyle(plotEl, { selectedpoints: [idx] }, [0]);
+  const highlighted = new Set(idx || []);
+  Plotly.restyle(plotEl, {
+    selectedpoints: [idx],
+    "marker.size": [sizes.map((size, i) => highlighted.has(i) ? Math.max(11, size * 1.7) : size)],
+    "marker.line.width": [sizes.map((_, i) => highlighted.has(i) ? 2 : 0)],
+    "marker.line.color": cssVar("--text"),
+  }, [0]);
 }
 function clusterMembers(cid) {
   const out = [];
@@ -325,6 +342,22 @@ function clusterMembers(cid) {
 
 function applySearch(q) {
   query = q.trim();
+  if (searchScope === "authors") {
+    activeCluster = null;
+    if (!X) {
+      matchSet = null;
+      hits.textContent = detailsError ? "Author metadata unavailable" : "Loading authors…";
+    } else {
+      const names = selectedAuthors.length ? selectedAuthors : [...authorIndex.values()]
+        .filter(entry => normalizeAuthor(entry.name).includes(normalizeAuthor(query))).map(entry => entry.name);
+      matchSet = selectedAuthors.length || query ? authorMatches(names) : null;
+      hits.textContent = matchSet === null ? "" : matchSet.size + " matching paper" + (matchSet.size === 1 ? "" : "s");
+    }
+    refreshHighlight();
+    if (panelView !== "paper" && panelView !== "saved") showAuthorResults();
+    syncUrl();
+    return;
+  }
   const lq = query.toLowerCase();
   if (!lq) {
     matchSet = null; hits.textContent = "";
@@ -337,6 +370,12 @@ function applySearch(q) {
   syncUrl();
 }
 function setQuery(q) {
+  clearTimeout(searchTimer);
+  if (searchScope === "authors") {
+    exitAuthorMode();
+    clearPaperRing();
+    showHome();
+  }
   search.value = q;
   applySearch(q);
 }
@@ -357,6 +396,125 @@ function paperRow(i, extra) {
   li.addEventListener("click", go);
   li.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
   return li;
+}
+
+function normalizeAuthor(name) {
+  return name.normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
+}
+function splitAuthors(value) {
+  return value.split(",").map(name => name.trim()).filter(Boolean);
+}
+function buildAuthorIndex() {
+  authorIndex = new Map();
+  X.authors.forEach((value, i) => splitAuthors(value).forEach(name => {
+    const key = normalizeAuthor(name);
+    if (!authorIndex.has(key)) authorIndex.set(key, { name, papers: new Set() });
+    authorIndex.get(key).papers.add(i);
+  }));
+}
+function authorMatches(names) {
+  const result = new Set();
+  names.forEach(name => authorIndex.get(normalizeAuthor(name))?.papers.forEach(i => result.add(i)));
+  return result;
+}
+function uniqueAuthors(names) {
+  const found = new Map();
+  names.forEach(name => {
+    const key = normalizeAuthor(name);
+    if (key && !found.has(key)) found.set(key, authorIndex.get(key)?.name || name.trim());
+  });
+  return [...found.values()];
+}
+function clearPaperRing() {
+  selectedPaper = -1;
+  Plotly.restyle(plotEl, { x: [[]], y: [[]] }, [1]);
+}
+function exitAuthorMode() {
+  clearTimeout(searchTimer);
+  searchScope = "all";
+  $("search-scope").value = "all";
+  selectedAuthors = [];
+  query = search.value = "";
+  matchSet = null;
+  hits.textContent = "";
+}
+function setSearchScope(scope) {
+  clearTimeout(searchTimer);
+  if (scope === "authors") {
+    searchScope = scope;
+    $("search-scope").value = scope;
+    activeCluster = null;
+    clearPaperRing();
+    panelView = "authors";
+  } else {
+    exitAuthorMode();
+    clearPaperRing();
+    showHome();
+  }
+  applySearch(search.value);
+}
+function selectAuthor(name) {
+  selectedAuthors = uniqueAuthors([name]);
+  search.value = "";
+  setSearchScope("authors");
+}
+function addAuthor(name) {
+  selectedAuthors = uniqueAuthors([...selectedAuthors, name]);
+  search.value = "";
+  setSearchScope("authors");
+}
+function removeAuthor(name) {
+  selectedAuthors = selectedAuthors.filter(n => normalizeAuthor(n) !== normalizeAuthor(name));
+  setSearchScope("authors");
+}
+function returnToAuthorResults() {
+  clearPaperRing();
+  panelView = "authors";
+  applySearch(query);
+}
+function showAuthorResults() {
+  panelView = "authors";
+  const selected = el("div", { className: "authors" });
+  selectedAuthors.forEach(name => {
+    const b = el("button", { type: "button", textContent: name + " ×", ariaLabel: "Remove " + name });
+    b.addEventListener("click", () => removeAuthor(name));
+    selected.append(b);
+  });
+  const nodes = [el("h2", {}, "Author results"), selected];
+  if (!X) {
+    nodes.push(el("p", { className: "hint" }, detailsError ? "Unable to load author metadata: " + detailsError.message : "Loading author metadata…"));
+    setPanel(...nodes);
+    return;
+  }
+  const draft = normalizeAuthor(query);
+  const selectedKeys = new Set(selectedAuthors.map(normalizeAuthor));
+  const suggestions = [...authorIndex.entries()]
+    .filter(([key]) => !selectedKeys.has(key) && key.includes(draft))
+    .map(([, entry]) => entry).sort((a, b) => b.papers.size - a.papers.size || a.name.localeCompare(b.name));
+  const choices = el("ul", { className: "list author-suggestions" });
+  suggestions.slice(0, 20).forEach(entry => {
+    const b = el("button", { type: "button", textContent: entry.name + " (" + entry.papers.size + ")", ariaLabel: "Add " + entry.name });
+    b.addEventListener("click", () => addAuthor(entry.name));
+    choices.append(el("li", {}, b));
+  });
+  nodes.push(el("h3", {}, "Add authors"), choices);
+  if (suggestions.length > 20) nodes.push(el("p", { className: "hint" }, "First 20 suggestions shown. Refine the search to find more authors."));
+  const idx = [...(matchSet || [])];
+  const fit = el("button", { type: "button", textContent: "Fit matching papers", disabled: !idx.length });
+  fit.addEventListener("click", () => { if (idx.length) zoomTo(idx.map(i => D.x[i]), idx.map(i => D.y[i])); });
+  nodes.push(el("h3", {}, matchSet === null ? "Search authors to highlight their papers" : idx.length + " matching paper" + (idx.length === 1 ? "" : "s")), fit);
+  if (matchSet !== null) {
+    const counts = new Map();
+    idx.forEach(i => counts.set(D.c[i], (counts.get(D.c[i]) || 0) + 1));
+    const topics = el("ul", { className: "list" });
+    [...counts].sort((a,b) => b[1]-a[1]).forEach(([cid,n]) => topics.append(el("li", { style: "cursor:default" }, (cid === -1 ? "unclustered" : D.clusters[cid].name) + ": " + n)));
+    const list = el("ul", { className: "list" });
+    idx.slice(0,300).forEach(i => list.append(paperRow(i)));
+    nodes.push(topics, list);
+    if (!idx.length) nodes.push(el("p", { className: "hint" }, "No matching papers."));
+    if (idx.length > 300) nodes.push(el("p", { className: "hint" }, "First 300 matching papers listed; counts and map include all matches."));
+  }
+  setPanel(...nodes);
 }
 
 function showHome() {
@@ -380,6 +538,7 @@ function showHome() {
 }
 
 function selectCluster(cid) {
+  if (searchScope === "authors") { exitAuthorMode(); clearPaperRing(); }
   panelView = "cluster";
   activeCluster = cid;
   refreshHighlight();
@@ -398,6 +557,7 @@ function selectCluster(cid) {
 }
 
 function clearSelection() {
+  if (searchScope === "authors") exitAuthorMode();
   activeCluster = null; selectedPaper = -1;
   Plotly.restyle(plotEl, { x: [[]], y: [[]] }, [1]);
   refreshHighlight();
@@ -441,7 +601,13 @@ function renderPaper() {
     el("h2", {}, D.title[i]), badges,
   ];
   if (X) {
-    nodes.push(el("p", { className: "authors" }, X.authors[i]), actions);
+    const authors = el("div", { className: "authors" });
+    splitAuthors(X.authors[i]).forEach(name => {
+      const b = el("button", { type: "button", textContent: name, title: "Show papers by " + name, ariaLabel: "Show papers by " + name });
+      b.addEventListener("click", () => selectAuthor(name));
+      authors.append(b);
+    });
+    nodes.push(authors, actions);
     if (X.tldr[i]) nodes.push(el("p", { className: "tldr" }, X.tldr[i]));
     nodes.push(el("p", { className: "abstract" }, X.abstract[i]));
     if (X.kw[i].length) {
@@ -454,12 +620,15 @@ function renderPaper() {
       nodes.push(el("h3", {}, "Keywords"), chips);
     }
   } else {
-    nodes.push(actions, el("p", { className: "hint" }, "Loading abstract…"));
+    nodes.push(actions, el("p", { className: "hint" }, detailsError ? "Unable to load abstract: " + detailsError.message : "Loading abstract…"));
   }
   const sim = el("ul", { className: "list" });
   D.nn[i].forEach(j => sim.append(paperRow(j, D.clusters[D.c[j]] ? D.clusters[D.c[j]].name : "")));
   const back = el("button", { className: "link", textContent: activeCluster !== null ? "← Back to topic" : "← All topics" });
-  back.addEventListener("click", () => activeCluster !== null ? selectCluster(activeCluster) : clearSelection());
+  if (searchScope === "authors") {
+    back.textContent = "← Back to author results";
+    back.addEventListener("click", returnToAuthorResults);
+  } else back.addEventListener("click", () => activeCluster !== null ? selectCluster(activeCluster) : clearSelection());
   setPanel(el("div", { className: "row" }, back), ...nodes, el("h3", {}, "Similar papers"), sim);
 }
 
@@ -510,19 +679,29 @@ function downloadCsv(idx) {
 
 // ---------- URL state: ?q=search&p=<openreview id>&c=<cluster id>&color=<mode> ----------
 function syncUrl() {
+  if (restoringUrl) return;
   const u = new URL(location);
   const set = (k, v) => v ? u.searchParams.set(k, v) : u.searchParams.delete(k);
+  set("scope", searchScope === "authors" ? "authors" : "");
+  u.searchParams.delete("author");
+  if (searchScope === "authors") selectedAuthors.forEach(name => u.searchParams.append("author", name));
   set("q", query);
   set("p", selectedPaper >= 0 ? D.id[selectedPaper] : "");
-  set("c", activeCluster !== null && selectedPaper < 0 ? activeCluster : "");
+  set("c", activeCluster !== null && selectedPaper < 0 ? String(activeCluster) : "");
   set("color", $("colorby").value !== "topic" ? $("colorby").value : "");
   history.replaceState(null, "", u);
 }
 
 // ---------- boot ----------
 function wire() {
-  let timer;
-  search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => applySearch(search.value), 150); });
+  search.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      if (searchScope === "authors") { clearPaperRing(); panelView = "authors"; }
+      applySearch(search.value);
+    }, 150);
+  });
+  $("search-scope").addEventListener("change", () => setSearchScope($("search-scope").value));
   $("colorby").addEventListener("change", () => { recolor(); syncUrl(); });
   $("btn-topics").addEventListener("click", clearSelection);
   $("btn-saved").addEventListener("click", showSaved);
@@ -531,7 +710,13 @@ function wire() {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
     if (e.key === "/" && !typing) { e.preventDefault(); search.focus(); search.select(); }
     else if (e.key === "Escape") {
-      if (document.activeElement === search && search.value) setQuery("");
+      if (searchScope === "authors") {
+        clearTimeout(searchTimer);
+        if (selectedPaper >= 0 || panelView === "saved") returnToAuthorResults();
+        else if (search.value || query) { search.value = ""; applySearch(""); }
+        else if (selectedAuthors.length) { selectedAuthors = []; applySearch(""); }
+        else clearSelection();
+      } else if (document.activeElement === search && search.value) setQuery("");
       else if (selectedPaper >= 0 || activeCluster !== null) clearSelection();
       search.blur();
     }
@@ -542,6 +727,42 @@ function buildHaystack() {
   haystack = D.title.map((t, i) => X
     ? (t + " " + X.authors[i] + " " + X.kw[i].join(" ") + " " + X.tldr[i] + " " + X.abstract[i]).toLowerCase()
     : t.toLowerCase());
+}
+
+function restoreUrl(params) {
+  restoringUrl = true;
+  exitAuthorMode();
+  activeCluster = null;
+  clearPaperRing();
+  panelView = "home";
+  const authors = params.getAll("author");
+  if (params.get("scope") === "authors" || authors.length) {
+    selectedAuthors = uniqueAuthors(authors);
+    search.value = params.get("q") || "";
+    setSearchScope("authors");
+  } else setQuery(params.get("q") || "");
+  const p = params.get("p"), c = params.get("c");
+  const pi = p ? D.id.indexOf(p) : -1;
+  if (pi >= 0) { selectPaper(pi); if (searchScope !== "authors") panTo(pi); }
+  else if (searchScope !== "authors" && c !== null && D.clusters[c]) selectCluster(+c);
+  restoringUrl = false;
+  syncUrl();
+}
+function detailsLoaded(details) {
+  X = details;
+  detailsError = null;
+  buildHaystack();
+  buildAuthorIndex();
+  selectedAuthors = uniqueAuthors(selectedAuthors);
+  applySearch(query);
+  if (panelView === "paper") renderPaper();
+  else if (panelView === "saved") showSaved();
+}
+function detailsFailed(err) {
+  detailsError = err;
+  if (searchScope === "authors") applySearch(query);
+  else hits.textContent = "abstracts failed to load: " + err;
+  if (panelView === "paper") renderPaper();
 }
 
 async function fetchJson(path) {
@@ -571,23 +792,10 @@ fetchJson("data.json").then(async data => {
   search.disabled = false;
   showHome();
 
-  const apply = () => {
-    const q = params.get("q"), p = params.get("p"), c = params.get("c");
-    if (q) setQuery(q);
-    const pi = p ? D.id.indexOf(p) : -1;
-    if (pi >= 0) { selectPaper(pi); panTo(pi); }
-    else if (c !== null && D.clusters[c]) selectCluster(+c);
-  };
-  apply();
+  restoreUrl(params);
 
-  // Abstracts are large; they load after the map is already interactive.
-  fetchJson("details.json").then(details => {
-    X = details;
-    buildHaystack();
-    if (query) applySearch(query);
-    if (panelView === "paper") renderPaper();
-    else if (panelView === "saved") showSaved();
-  }).catch(err => { hits.textContent = "abstracts failed to load: " + err; });
+  // Author requests remain live state while the larger details payload loads.
+  fetchJson("details.json").then(detailsLoaded).catch(detailsFailed);
 }).catch(err => {
   panel.replaceChildren(el("p", { className: "hint" }, "Unable to start the explorer: " + err.message));
 });

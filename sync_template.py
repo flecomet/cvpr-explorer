@@ -63,6 +63,20 @@ def trial(src, dst):
         return subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=copy).returncode
 
 
+def sync_commit(src, dst):
+    """Copy and commit shared files only when the target checkout is clean."""
+    status = subprocess.run(["git", "-C", dst, "status", "--porcelain"],
+                            check=True, capture_output=True, text=True).stdout
+    if status:
+        raise RuntimeError("The sister checkout must be clean before synchronization")
+    todo = sync(src, dst)
+    if todo:
+        subprocess.run(["git", "-C", dst, "add", "--", *todo], check=True)
+        subprocess.run(["git", "-C", dst, "-c", "commit.gpgsign=false", "commit",
+                        "-m", "Sync shared explorer files"], check=True)
+    return todo
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("target", help="root of the repository to update")
@@ -70,6 +84,8 @@ def main():
     mode.add_argument("--check", action="store_true", help="report differences, change nothing")
     mode.add_argument("--test", action="store_true",
                       help="run the target's tests with these shared files, change nothing")
+    mode.add_argument("--commit", action="store_true",
+                      help="copy shared files and commit them in a clean target checkout")
     args = ap.parse_args()
     src = os.path.dirname(os.path.abspath(__file__))
     if not os.path.exists(os.path.join(args.target, "config.py")):
@@ -77,7 +93,10 @@ def main():
     if args.test:
         sys.exit(trial(src, args.target))
 
-    todo = stale(src, args.target) if args.check else sync(src, args.target)
+    if args.commit:
+        todo = sync_commit(src, args.target)
+    else:
+        todo = stale(src, args.target) if args.check else sync(src, args.target)
     for p in todo:
         print(("differs: " if args.check else "copied: ") + p)
     if not todo:

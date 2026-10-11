@@ -72,3 +72,32 @@ def test_render_index_rejects_unknown_placeholder():
 def test_template_uses_only_known_placeholders():
     with open(build_site.TEMPLATE_PATH, encoding="utf-8") as f:
         build_site.render_index(f.read())
+
+
+def test_old_identifiers_resolve_to_current_papers():
+    papers, layout = make()
+    papers[0]["aliases"] = ["legacy", "older"]
+    core, _ = build_site.build(papers, layout)
+    assert core["aliases"] == {"legacy": "id0", "older": "id0"}
+
+
+def test_alias_cannot_point_to_two_papers():
+    papers, layout = make()
+    papers[0]["aliases"] = ["legacy"]
+    papers[1]["aliases"] = ["legacy"]
+    with pytest.raises(AssertionError, match="alias"):
+        build_site.build(papers, layout)
+
+
+def test_alias_cannot_replace_another_current_identifier():
+    papers, layout = make()
+    papers[0]["aliases"] = ["id1"]
+    with pytest.raises(AssertionError, match="alias"):
+        build_site.build(papers, layout)
+
+
+def test_duplicate_titles_are_rejected_before_publication():
+    papers, layout = make()
+    papers[1]["title"] = "t0!"
+    with pytest.raises(AssertionError, match="duplicate paper titles"):
+        build_site.build(papers, layout)

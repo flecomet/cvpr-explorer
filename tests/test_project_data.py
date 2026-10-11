@@ -74,6 +74,7 @@ class Element {
   blur() { document.activeElement=document.body; }
   select() {}
   querySelector() { return {remove(){}}; }
+  setAttribute(name,value) { this[name]=String(value); }
 }
 const elements = new Map();
 const document = {getElementById(id) { if (!elements.has(id)) elements.set(id,new Element()); return elements.get(id); }, createElement(tag) {return new Element(tag);}, documentElement:new Element(), body:new Element(), listeners:{}, addEventListener(k,f){this.listeners[k]=f;}};
@@ -248,4 +249,24 @@ selectAuthor('Ada Lovelace'); selectCluster(0);
 assert.equal(location.searchParams.get('c'),'0');
 assert.equal(location.searchParams.get('scope'),null);
 assert.equal(location.searchParams.getAll('author').length,0);
+''')
+
+
+def test_saved_duplicate_identifiers_migrate_to_one_paper(tmp_path):
+    run_author_js(tmp_path, r'''
+D.aliases={legacy:'a',older:'a'};
+saved=['legacy','a','older','unavailable','b'];
+migrateSavedIds();
+assert.deepEqual(saved,['a','unavailable','b']);
+showSaved();
+assert.match(text(panel),/Saved papers \(2\)/);
+''')
+
+
+def test_old_paper_url_opens_current_paper(tmp_path):
+    run_author_js(tmp_path, r'''
+D.aliases={legacy:'a'};
+restoreUrl(new URLSearchParams('p=legacy'));
+assert.equal(selectedPaper,0);
+assert.equal(location.searchParams.get('p'),'a');
 ''')

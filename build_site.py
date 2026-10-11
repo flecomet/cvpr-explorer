@@ -37,6 +37,19 @@ def render_index(template):
 
 
 def build(papers, layout):
+    ids = {p["id"] for p in papers}
+    assert len(ids) == len(papers), "duplicate paper ids"
+    titles = {re.sub(r"\W+", " ", p["title"]).strip().lower() for p in papers}
+    assert len(titles) == len(papers), "duplicate paper titles"
+    aliases = {}
+    for p in papers:
+        for alias in p.get("aliases", []):
+            if alias == p["id"]:
+                continue
+            assert alias not in ids, f"alias {alias} conflicts with a current paper id"
+            assert alias not in aliases or aliases[alias] == p["id"], f"ambiguous alias {alias}"
+            aliases[alias] = p["id"]
+
     points = layout["points"]
     assert len(points) == len(papers), f"{len(points)} points != {len(papers)} papers"
     assert len(layout["neighbors"]) == len(papers), "neighbor count != paper count"
@@ -73,6 +86,7 @@ def build(papers, layout):
         "tracks": tracks,
         "sites": sites,
         "id": [p["id"] for p in papers],
+        "aliases": aliases,
         "x": x,
         "y": y,
         "c": c,

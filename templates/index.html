@@ -48,9 +48,12 @@
   .spacer { flex: 1; }
   header a { color: var(--muted); font-size: 13px; text-decoration: none; }
   header a:hover { text-decoration: underline; }
-  #legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0 16px; font-size: 12px; color: var(--muted); }
-  #legend:not(:empty) { padding: 8px 16px; border-bottom: 1px solid var(--border); }
-  #legend span { display: inline-flex; align-items: center; gap: 5px; }
+  #filters { padding: 8px 16px; border-bottom: 1px solid var(--border); }
+  .filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 3px 0; }
+  .filter-row > span { min-width: 100px; font-size: 13px; color: var(--muted); }
+  .filter-row button { font-size: 12px; padding: 4px 9px; border-radius: 999px; }
+  .filter-row button[aria-pressed="true"] { border-color: var(--accent); background: var(--chip); }
+  #filter-count { font-size: 12px; color: var(--muted); }
   .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
   main { display: flex; flex: 1; min-height: 0; }
   #plot { flex: 1 1 620px; min-width: 0; }
@@ -102,20 +105,18 @@
   <label class="hint" for="search-scope">Search in</label>
   <select id="search-scope"><option value="all">All fields</option><option value="authors">Authors</option></select>
   <span id="hits" aria-live="polite"></span>
-  <label class="hint" for="colorby">Color by</label>
-  <select id="colorby">
-    <option value="topic">Topic</option>
-    <option value="decision">Presentation</option>
-    <option value="area">Primary area</option>
-    <option value="site">Location</option>
-  </select>
   <button id="btn-topics" title="Browse topics">Topics</button>
   <button id="btn-saved" title="Saved papers">★ Saved <span id="saved-n">0</span></button>
   <span class="spacer"></span>
   <button id="btn-theme" title="Toggle light/dark theme">Theme</button>
   <a href="@@REPO_URL@@" target="_blank" rel="noopener">GitHub</a>
 </header>
-<div id="legend"></div>
+<div id="filters" aria-label="Paper filters">
+  <div id="location-filters" class="filter-row" role="group" aria-label="Location"></div>
+  <div id="presentation-filters" class="filter-row" role="group" aria-label="Presentation"></div>
+  <button id="clear-filters" type="button">Clear filters</button>
+  <span id="filter-count" aria-live="polite"></span>
+</div>
 <main>
   <div id="plot"></div>
   <aside id="panel"><p class="hint">Loading papers…</p></aside>
@@ -143,6 +144,8 @@ let activeCluster = null;      // cluster id being browsed, or null
 let query = "";
 let searchScope = "all";
 let selectedAuthors = [];
+const selectedSites = new Set();
+const selectedDecisions = new Set();
 let authorIndex = new Map();
 let detailsError = null;
 let searchTimer;
@@ -157,6 +160,13 @@ function loadSaved() {
 function storeSaved() {
   try { localStorage.setItem(SAVED_KEY, JSON.stringify(saved)); } catch (e) { /* ignore */ }
   $("saved-n").textContent = saved.length;
+}
+function canonicalPaperId(id) {
+  return D.aliases?.[id] || id;
+}
+function migrateSavedIds() {
+  saved = [...new Set(saved.map(canonicalPaperId))];
+  storeSaved();
 }
 
 // ---------- theme ----------
@@ -188,51 +198,50 @@ function hue(i) {
   const light = currentTheme() === "light";
   return "hsl(" + ((i * 137.508) % 360).toFixed(1) + "," + (light ? "65%,42%" : "65%,60%") + ")";
 }
-// Okabe-Ito colorblind-safe palette; presentation level is also encoded by size.
-const DECISION_STYLE = {
-  oral: { color: "#D55E00", size: 9 },
-  spotlight: { color: "#E69F00", size: 7 },
-  poster: { color: "#56B4E9", size: 5 },
-  other: { color: "#999999", size: 5 },
-};
 function prettyArea(a) {
   return a ? a.replace(/_/g, " ").replace(/^./, c => c.toUpperCase()) : "(none)";
 }
 
-function computeStyle(mode) {
-  const n = D.x.length;
-  const noise = cssVar("--noise");
-  const legend = [];
-  if (mode === "decision") {
-    colors = D.dec.map(d => DECISION_STYLE[D.decisions[d]].color);
-    sizes = D.dec.map(d => DECISION_STYLE[D.decisions[d]].size);
-    D.decisions.forEach(d => legend.push([DECISION_STYLE[d].color, d]));
-  } else if (mode === "site") {
-    colors = D.site.map(s => hue(s));
-    sizes = new Array(n).fill(5);
-    D.sites.forEach((s, i) => legend.push([hue(i), s || "(none)"]));
-  } else if (mode === "area") {
-    colors = D.area.map(a => hue(a));
-    sizes = new Array(n).fill(5);
-    D.areas.forEach((a, i) => legend.push([hue(i), prettyArea(a)]));
-  } else {
-    colors = D.c.map(c => c === -1 ? noise : hue(c));
-    sizes = new Array(n).fill(5);
-  }
-  const el = $("legend");
-  el.replaceChildren(...legend.map(([color, label]) => {
-    const s = document.createElement("span");
-    const d = document.createElement("i");
-    d.className = "dot"; d.style.background = color;
-    s.append(d, label);
-    return s;
-  }));
+function computeStyle() {
+  colors = D.c.map(c => c === -1 ? cssVar("--noise") : hue(c));
+  sizes = new Array(D.x.length).fill(5);
 }
 
 function recolor() {
-  computeStyle($("colorby").value);
+  computeStyle();
   Plotly.restyle(plotEl, { "marker.color": [colors], "marker.size": [sizes] }, [0]);
   refreshHighlight();
+}
+
+function matchesCategories(i) {
+  return (!selectedSites.size || selectedSites.has(D.sites[D.site[i]])) &&
+    (!selectedDecisions.size || selectedDecisions.has(D.decisions[D.dec[i]]));
+}
+function renderFilters() {
+  const row = (id, label, values, selection) => {
+    const button = (text, value) => {
+      const b = el("button", { type: "button", textContent: text });
+      b.setAttribute("aria-pressed", String(value === null ? !selection.size : selection.has(value)));
+      b.addEventListener("click", () => {
+        if (value === null) selection.clear();
+        else if (selection.has(value)) selection.delete(value);
+        else selection.add(value);
+        filtersChanged();
+      });
+      return b;
+    };
+    $(id).replaceChildren(el("span", {}, label), button("All", null),
+      ...values.map(value => button(value || "None", value)));
+  };
+  row("location-filters", "Location", D.sites, selectedSites);
+  row("presentation-filters", "Presentation", D.decisions, selectedDecisions);
+  $("clear-filters").disabled = !selectedSites.size && !selectedDecisions.size;
+}
+function filtersChanged() {
+  renderFilters();
+  refreshHighlight();
+  if (panelView === "authors") showAuthorResults();
+  syncUrl();
 }
 
 // ---------- plot ----------
@@ -326,11 +335,16 @@ function refreshHighlight() {
   if (matchSet && activeCluster !== null) idx = [...matchSet].filter(i => D.c[i] === activeCluster);
   else if (matchSet) idx = [...matchSet];
   else if (activeCluster !== null) idx = clusterMembers(activeCluster);
+  if (selectedSites.size || selectedDecisions.size) {
+    idx = (idx === null ? D.x.map((_, i) => i) : idx).filter(matchesCategories);
+  }
+  $("filter-count").textContent = idx === null ? "All papers visible" : idx.length + " of " + D.x.length + " papers highlighted";
   const highlighted = new Set(idx || []);
+  const enlarge = matchSet !== null || activeCluster !== null;
   Plotly.restyle(plotEl, {
     selectedpoints: [idx],
-    "marker.size": [sizes.map((size, i) => highlighted.has(i) ? Math.max(11, size * 1.7) : size)],
-    "marker.line.width": [sizes.map((_, i) => highlighted.has(i) ? 2 : 0)],
+    "marker.size": [sizes.map((size, i) => enlarge && highlighted.has(i) ? Math.max(11, size * 1.7) : size)],
+    "marker.line.width": [sizes.map((_, i) => enlarge && highlighted.has(i) ? 2 : 0)],
     "marker.line.color": cssVar("--text"),
   }, [0]);
 }
@@ -499,7 +513,7 @@ function showAuthorResults() {
   });
   nodes.push(el("h3", {}, "Add authors"), choices);
   if (suggestions.length > 20) nodes.push(el("p", { className: "hint" }, "First 20 suggestions shown. Refine the search to find more authors."));
-  const idx = [...(matchSet || [])];
+  const idx = [...(matchSet || [])].filter(matchesCategories);
   const fit = el("button", { type: "button", textContent: "Fit matching papers", disabled: !idx.length });
   fit.addEventListener("click", () => { if (idx.length) zoomTo(idx.map(i => D.x[i]), idx.map(i => D.y[i])); });
   nodes.push(el("h3", {}, matchSet === null ? "Search authors to highlight their papers" : idx.length + " matching paper" + (idx.length === 1 ? "" : "s")), fit);
@@ -677,7 +691,7 @@ function downloadCsv(idx) {
   URL.revokeObjectURL(a.href);
 }
 
-// ---------- URL state: ?q=search&p=<openreview id>&c=<cluster id>&color=<mode> ----------
+// ---------- URL state ----------
 function syncUrl() {
   if (restoringUrl) return;
   const u = new URL(location);
@@ -688,7 +702,11 @@ function syncUrl() {
   set("q", query);
   set("p", selectedPaper >= 0 ? D.id[selectedPaper] : "");
   set("c", activeCluster !== null && selectedPaper < 0 ? String(activeCluster) : "");
-  set("color", $("colorby").value !== "topic" ? $("colorby").value : "");
+  u.searchParams.delete("color");
+  for (const [key, selection] of [["location", selectedSites], ["presentation", selectedDecisions]]) {
+    u.searchParams.delete(key);
+    selection.forEach(value => u.searchParams.append(key, value));
+  }
   history.replaceState(null, "", u);
 }
 
@@ -702,7 +720,9 @@ function wire() {
     }, 150);
   });
   $("search-scope").addEventListener("change", () => setSearchScope($("search-scope").value));
-  $("colorby").addEventListener("change", () => { recolor(); syncUrl(); });
+  $("clear-filters").addEventListener("click", () => {
+    selectedSites.clear(); selectedDecisions.clear(); filtersChanged();
+  });
   $("btn-topics").addEventListener("click", clearSelection);
   $("btn-saved").addEventListener("click", showSaved);
   $("btn-theme").addEventListener("click", toggleTheme);
@@ -731,6 +751,10 @@ function buildHaystack() {
 
 function restoreUrl(params) {
   restoringUrl = true;
+  selectedSites.clear(); selectedDecisions.clear();
+  params.getAll("location").filter(value => D.sites.includes(value)).forEach(value => selectedSites.add(value));
+  params.getAll("presentation").filter(value => D.decisions.includes(value)).forEach(value => selectedDecisions.add(value));
+  renderFilters();
   exitAuthorMode();
   activeCluster = null;
   clearPaperRing();
@@ -742,7 +766,7 @@ function restoreUrl(params) {
     setSearchScope("authors");
   } else setQuery(params.get("q") || "");
   const p = params.get("p"), c = params.get("c");
-  const pi = p ? D.id.indexOf(p) : -1;
+  const pi = p ? D.id.indexOf(canonicalPaperId(p)) : -1;
   if (pi >= 0) { selectPaper(pi); if (searchScope !== "authors") panTo(pi); }
   else if (searchScope !== "authors" && c !== null && D.clusters[c]) selectCluster(+c);
   restoringUrl = false;
@@ -778,14 +802,10 @@ initTheme();
 storeSaved();
 fetchJson("data.json").then(async data => {
   D = data;
+  migrateSavedIds();
   const params = new URLSearchParams(location.search);
-  const mode = params.get("color");
-  if (["decision", "area", "site"].includes(mode)) $("colorby").value = mode;
-  // Hide the "color by" options that carry no information for this dataset.
-  if (D.decisions.length < 2) $("colorby").querySelector('[value="decision"]').remove();
-  if (D.areas.length < 2) $("colorby").querySelector('[value="area"]').remove();
-  if (D.sites.length < 2) $("colorby").querySelector('[value="site"]').remove();
-  computeStyle($("colorby").value);
+  computeStyle();
+  renderFilters();
   buildHaystack();
   await initPlot();
   wire();

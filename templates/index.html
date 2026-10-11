@@ -101,9 +101,9 @@
 <body>
 <header>
   <h1>@@NAME@@ <small>Explorer</small></h1>
-  <input id="search" type="search" placeholder="Search titles, authors, abstracts…  ( / )" autocomplete="off" disabled aria-label="Search papers">
+  <input id="search" type="search" placeholder="Search titles, authors, affiliations, abstracts…  ( / )" autocomplete="off" disabled aria-label="Search papers">
   <label class="hint" for="search-scope">Search in</label>
-  <select id="search-scope"><option value="all">All fields</option><option value="authors">Authors</option></select>
+  <select id="search-scope"><option value="all">All fields</option><option value="authors">Authors &amp; affiliations</option></select>
   <span id="hits" aria-live="polite"></span>
   <button id="btn-topics" title="Browse topics">Topics</button>
   <button id="btn-saved" title="Saved papers">★ Saved <span id="saved-n">0</span></button>
@@ -362,8 +362,9 @@ function applySearch(q) {
       matchSet = null;
       hits.textContent = detailsError ? "Author metadata unavailable" : "Loading authors…";
     } else {
-      const names = selectedAuthors.length ? selectedAuthors : [...authorIndex.values()]
-        .filter(entry => normalizeAuthor(entry.name).includes(normalizeAuthor(query))).map(entry => entry.name);
+      const draft = normalizeAuthor(query);
+      const names = selectedAuthors.length ? selectedAuthors : [...authorIndex.entries()]
+        .filter(([, entry]) => authorEntryMatches(entry, draft)).map(([key]) => key);
       matchSet = selectedAuthors.length || query ? authorMatches(names) : null;
       hits.textContent = matchSet === null ? "" : matchSet.size + " matching paper" + (matchSet.size === 1 ? "" : "s");
     }
@@ -418,26 +419,61 @@ function normalizeAuthor(name) {
 function splitAuthors(value) {
   return value.split(",").map(name => name.trim()).filter(Boolean);
 }
+function paperAuthors(i) {
+  return X.author_details?.[i]?.length ? X.author_details[i]
+    : splitAuthors(X.authors[i]).map(name => ({id: null, name, institution: ""}));
+}
+function authorKey(author) {
+  return author.id || "name:" + normalizeAuthor(author.name);
+}
 function buildAuthorIndex() {
   authorIndex = new Map();
-  X.authors.forEach((value, i) => splitAuthors(value).forEach(name => {
-    const key = normalizeAuthor(name);
-    if (!authorIndex.has(key)) authorIndex.set(key, { name, papers: new Set() });
-    authorIndex.get(key).papers.add(i);
+  X.authors.forEach((_, i) => paperAuthors(i).forEach(author => {
+    const key = authorKey(author);
+    if (!authorIndex.has(key)) authorIndex.set(key, { name: author.name, authorId: author.id || "", institutions: new Set(), papers: new Set() });
+    const entry = authorIndex.get(key);
+    if (author.institution) entry.institutions.add(author.institution);
+    entry.papers.add(i);
   }));
+}
+// Every searchable field shown for an author: name, affiliations, NeurIPS id.
+function authorSearchText(author) {
+  return [author.name, author.institution, author.id ? author.id.replace(/^neurips:/, "") : ""]
+    .filter(Boolean).join(" ").toLowerCase();
+}
+// An author matches the query on any of their fields, not just their name.
+function authorEntryMatches(entry, query) {
+  if (!query) return true;
+  const id = entry.authorId ? entry.authorId.replace(/^neurips:/, "").toLowerCase() : "";
+  return normalizeAuthor(entry.name).includes(query) || (!!id && id.includes(query)) ||
+    [...entry.institutions].some(value => normalizeAuthor(value).includes(query));
 }
 function authorMatches(names) {
   const result = new Set();
-  names.forEach(name => authorIndex.get(normalizeAuthor(name))?.papers.forEach(i => result.add(i)));
+  uniqueAuthors(names).forEach(key => authorIndex.get(key)?.papers.forEach(i => result.add(i)));
   return result;
 }
 function uniqueAuthors(names) {
   const found = new Map();
   names.forEach(name => {
-    const key = normalizeAuthor(name);
-    if (key && !found.has(key)) found.set(key, authorIndex.get(key)?.name || name.trim());
+    if (/^neurips:[1-9]\d*$/.test(name) || name.startsWith("name:")) {
+      found.set(name, name);
+      return;
+    }
+    const normalized = normalizeAuthor(name);
+    if (!normalized) return;
+    if (!X) { found.set(normalized, name.trim()); return; }
+    const matches = [...authorIndex.entries()].filter(([, entry]) => normalizeAuthor(entry.name) === normalized);
+    if (matches.length) matches.forEach(([key]) => found.set(key, key));
+    else found.set("name:" + normalized, "name:" + normalized);
   });
   return [...found.values()];
+}
+function authorLabel(key) {
+  const entry = authorIndex.get(key);
+  if (!entry) return key.startsWith("name:") ? key.slice(5) + " · identity not verified" : key;
+  if (key.startsWith("name:")) return entry.name + " · identity not verified";
+  return entry.name + (entry.institutions.size ? " · " + [...entry.institutions].join(" / ") : "") + " · NeurIPS #" + key.slice(8);
 }
 function clearPaperRing() {
   selectedPaper = -1;
@@ -478,7 +514,8 @@ function addAuthor(name) {
   setSearchScope("authors");
 }
 function removeAuthor(name) {
-  selectedAuthors = selectedAuthors.filter(n => normalizeAuthor(n) !== normalizeAuthor(name));
+  const keys = new Set(uniqueAuthors([name]));
+  selectedAuthors = selectedAuthors.filter(n => !keys.has(n));
   setSearchScope("authors");
 }
 function returnToAuthorResults() {
@@ -489,9 +526,9 @@ function returnToAuthorResults() {
 function showAuthorResults() {
   panelView = "authors";
   const selected = el("div", { className: "authors" });
-  selectedAuthors.forEach(name => {
-    const b = el("button", { type: "button", textContent: name + " ×", ariaLabel: "Remove " + name });
-    b.addEventListener("click", () => removeAuthor(name));
+  selectedAuthors.forEach(key => {
+    const b = el("button", { type: "button", textContent: authorLabel(key) + " ×", ariaLabel: "Remove " + authorLabel(key) });
+    b.addEventListener("click", () => removeAuthor(key));
     selected.append(b);
   });
   const nodes = [el("h2", {}, "Author results"), selected];
@@ -501,14 +538,14 @@ function showAuthorResults() {
     return;
   }
   const draft = normalizeAuthor(query);
-  const selectedKeys = new Set(selectedAuthors.map(normalizeAuthor));
+  const selectedKeys = new Set(selectedAuthors);
   const suggestions = [...authorIndex.entries()]
-    .filter(([key]) => !selectedKeys.has(key) && key.includes(draft))
-    .map(([, entry]) => entry).sort((a, b) => b.papers.size - a.papers.size || a.name.localeCompare(b.name));
+    .filter(([key, entry]) => !selectedKeys.has(key) && authorEntryMatches(entry, draft))
+    .sort(([, a], [, b]) => b.papers.size - a.papers.size || a.name.localeCompare(b.name));
   const choices = el("ul", { className: "list author-suggestions" });
-  suggestions.slice(0, 20).forEach(entry => {
-    const b = el("button", { type: "button", textContent: entry.name + " (" + entry.papers.size + ")", ariaLabel: "Add " + entry.name });
-    b.addEventListener("click", () => addAuthor(entry.name));
+  suggestions.slice(0, 20).forEach(([key, entry]) => {
+    const b = el("button", { type: "button", textContent: authorLabel(key) + " (" + entry.papers.size + ")", ariaLabel: "Add " + (key.startsWith("name:") ? entry.name : authorLabel(key)) });
+    b.addEventListener("click", () => addAuthor(key));
     choices.append(el("li", {}, b));
   });
   nodes.push(el("h3", {}, "Add authors"), choices);
@@ -616,12 +653,14 @@ function renderPaper() {
   ];
   if (X) {
     const authors = el("div", { className: "authors" });
-    splitAuthors(X.authors[i]).forEach(name => {
-      const b = el("button", { type: "button", textContent: name, title: "Show papers by " + name, ariaLabel: "Show papers by " + name });
-      b.addEventListener("click", () => selectAuthor(name));
+    paperAuthors(i).forEach(author => {
+      const key = authorKey(author);
+      const b = el("button", { type: "button", textContent: author.name, title: authorLabel(key), ariaLabel: "Show papers by " + (author.id ? authorLabel(key) : author.name) });
+      b.addEventListener("click", () => selectAuthor(key));
       authors.append(b);
     });
     nodes.push(authors, actions);
+    if (paperAuthors(i).some(author => !author.id)) nodes.push(el("p", { className: "hint" }, "Authors without a NeurIPS account ID are grouped by name; identity not verified."));
     if (X.tldr[i]) nodes.push(el("p", { className: "tldr" }, X.tldr[i]));
     nodes.push(el("p", { className: "abstract" }, X.abstract[i]));
     if (X.kw[i].length) {
@@ -698,7 +737,8 @@ function syncUrl() {
   const set = (k, v) => v ? u.searchParams.set(k, v) : u.searchParams.delete(k);
   set("scope", searchScope === "authors" ? "authors" : "");
   u.searchParams.delete("author");
-  if (searchScope === "authors") selectedAuthors.forEach(name => u.searchParams.append("author", name));
+  u.searchParams.delete("author-id");
+  if (searchScope === "authors") selectedAuthors.forEach(key => u.searchParams.append(/^neurips:|^name:/.test(key) ? "author-id" : "author", key));
   set("q", query);
   set("p", selectedPaper >= 0 ? D.id[selectedPaper] : "");
   set("c", activeCluster !== null && selectedPaper < 0 ? String(activeCluster) : "");
@@ -744,9 +784,12 @@ function wire() {
 }
 
 function buildHaystack() {
-  haystack = D.title.map((t, i) => X
-    ? (t + " " + X.authors[i] + " " + X.kw[i].join(" ") + " " + X.tldr[i] + " " + X.abstract[i]).toLowerCase()
-    : t.toLowerCase());
+  haystack = D.title.map((t, i) => {
+    if (!X) return t.toLowerCase();
+    const authors = paperAuthors(i).map(authorSearchText).join(" ");
+    return (t + " " + X.authors[i] + " " + authors + " "
+      + X.kw[i].join(" ") + " " + X.tldr[i] + " " + X.abstract[i]).toLowerCase();
+  });
 }
 
 function restoreUrl(params) {
@@ -759,7 +802,7 @@ function restoreUrl(params) {
   activeCluster = null;
   clearPaperRing();
   panelView = "home";
-  const authors = params.getAll("author");
+  const authors = [...params.getAll("author-id"), ...params.getAll("author")];
   if (params.get("scope") === "authors" || authors.length) {
     selectedAuthors = uniqueAuthors(authors);
     search.value = params.get("q") || "";

@@ -31,6 +31,17 @@ def test_columns_are_aligned():
         assert len(details[key]) == n, key
 
 
+def test_author_identities_reach_the_browser_without_changing_map():
+    papers, layout = make()
+    before, _ = build_site.build(papers, layout)
+    papers[0]['author_details'] = [
+        {'id': 'neurips:101', 'name': 'A', 'institution': 'University A'},
+    ]
+    after, details = build_site.build(papers, layout)
+    assert after == before
+    assert details['author_details'] == [papers[0]['author_details'], [], [], []]
+
+
 def test_unknown_decision_maps_to_other_and_order_is_fixed():
     papers, layout = make()
     core, _ = build_site.build(papers, layout)

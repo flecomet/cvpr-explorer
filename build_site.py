@@ -99,6 +99,7 @@ def build(papers, layout):
     }
     details = {
         "authors": [p["authors"] for p in papers],
+        "author_details": [p.get("author_details", []) for p in papers],
         "abstract": [p["abstract"] for p in papers],
         "tldr": [p["tldr"] for p in papers],
         "kw": [p["keywords"] for p in papers],

@@ -120,10 +120,108 @@ plotEl._fullLayout={xaxis:{range:[-1,8]},yaxis:{range:[-1,8]}};
 def test_author_index(tmp_path):
     run_author_js(tmp_path, r'''
 assert.equal(normalizeAuthor('  E\u0301mile   TEST '), 'émile test');
-assert.equal(authorIndex.get('ada lovelace').papers.size,2);
+assert.equal(authorIndex.get('name:ada lovelace').papers.size,2);
 assert.deepEqual([...authorMatches(['ada lovelace','Grace Hopper'])].sort(),[0,1,2]);
 assert.equal(authorMatches(['unknown']).size,0);
 assert.deepEqual(splitAuthors(' A, , B '),['A','B']);
+''')
+
+
+HOMONYM_DETAILS = r'''
+X={...details,authors:['Wei Wang','Wei Wang','WEI WANG','Wei Wang'],author_details:[
+ [{id:'neurips:101',name:'Wei Wang',institution:'University A'}],
+ [{id:'neurips:202',name:'Wei Wang',institution:'University B'}],
+ [{id:'neurips:101',name:'WEI WANG',institution:'University A'}],
+ []
+]};
+buildAuthorIndex();
+'''
+
+
+def test_identified_homonyms_and_unverified_names_stay_separate(tmp_path):
+    run_author_js(tmp_path, HOMONYM_DETAILS + r'''
+setSearchScope('authors'); applySearch('wei');
+assert.deepEqual([...matchSet].sort(),[0,1,2,3]);
+assert.match(text(panel),/University A/); assert.match(text(panel),/University B/);
+assert.match(text(panel),/identity not verified/i);
+selectAuthor('neurips:101'); assert.deepEqual([...matchSet].sort(),[0,2]);
+addAuthor('neurips:202'); assert.deepEqual([...matchSet].sort(),[0,1,2]);
+removeAuthor('neurips:101'); assert.deepEqual([...matchSet],[1]);
+selectAuthor('name:wei wang'); assert.deepEqual([...matchSet],[3]);
+''')
+
+
+AFFILIATION_DETAILS = r'''
+X={...details,
+ authors:['Caroline Wang','Grace Hopper','A. Third','Other'],
+ author_details:[
+  [{id:'neurips:161749',name:'Caroline Wang',institution:'UT Austin | Google DeepMind'}],
+  [{id:'neurips:100',name:'Grace Hopper',institution:'US Navy'}],
+  [],
+  []
+ ]};
+D={...fixture,title:['ROTATE','Other Paper','Third','Mention']};
+buildHaystack(); buildAuthorIndex();
+'''
+
+
+def test_search_matches_full_author_info(tmp_path):
+    run_author_js(tmp_path, AFFILIATION_DETAILS + r'''
+setQuery('deepmind');
+assert.deepEqual([...matchSet],[0]);
+setQuery('navy');
+assert.deepEqual([...matchSet],[1]);
+setQuery('161749');
+assert.deepEqual([...matchSet],[0]);
+setQuery('third');
+assert.deepEqual([...matchSet],[2]);
+''')
+
+
+def test_author_search_matches_full_author_info(tmp_path):
+    run_author_js(tmp_path, AFFILIATION_DETAILS + r'''
+setSearchScope('authors'); applySearch('deepmind');
+assert.deepEqual([...matchSet],[0]);
+assert.match(text(panel),/Caroline Wang/);
+assert.match(text(panel),/Google DeepMind/);
+applySearch('161749');
+assert.deepEqual([...matchSet],[0]);
+assert.match(text(panel),/Caroline Wang/);
+selectAuthor('neurips:161749'); assert.deepEqual([...matchSet],[0]);
+''')
+
+
+def test_paper_author_button_selects_its_identity(tmp_path):
+    run_author_js(tmp_path, HOMONYM_DETAILS + r'''
+selectPaper(1);
+descendants(panel).find(e=>e.tagName==='BUTTON' && e.textContent==='Wei Wang').click();
+assert.deepEqual([...matchSet],[1]);
+selectPaper(3);
+descendants(panel).find(e=>e.tagName==='BUTTON' && e.textContent==='Wei Wang').click();
+assert.deepEqual([...matchSet],[3]);
+assert.match(text(panel),/identity not verified/i);
+''')
+
+
+def test_author_identity_url_survives_loading_and_navigation(tmp_path):
+    run_author_js(tmp_path, HOMONYM_DETAILS + r'''
+const enriched=X;
+X=null;
+restoreUrl(new URLSearchParams('scope=authors&author-id=neurips%3A202&p=b'));
+detailsLoaded(enriched);
+assert.equal(selectedPaper,1); assert.deepEqual([...matchSet],[1]);
+assert.equal(location.searchParams.get('author-id'),'neurips:202');
+returnToAuthorResults(); addAuthor('neurips:101');
+const shared=new URLSearchParams(location.search);
+clearSelection(); restoreUrl(shared);
+assert.deepEqual([...matchSet].sort(),[0,1,2]);
+restoreUrl(new URLSearchParams('scope=authors&author=Wei+Wang'));
+assert.deepEqual([...matchSet].sort(),[0,1,2,3]);
+selectAuthor('name:wei wang');
+assert.equal(location.searchParams.get('author-id'),'name:wei wang');
+const unverifiedUrl=new URLSearchParams(location.search);
+clearSelection(); restoreUrl(unverifiedUrl);
+assert.deepEqual([...matchSet],[3]);
 ''')
 
 
@@ -161,7 +259,7 @@ def test_author_url(tmp_path):
 restoreUrl(new URLSearchParams('scope=authors&author=E%CC%81mile+Test&author=ÉMILE+TEST&author=Unknown&c=0&p=c&q=draft'));
 assert.equal(selectedAuthors.length,2); assert.equal(activeCluster,null); assert.equal(selectedPaper,2);
 assert.equal(location.searchParams.get('c'),null);
-assert.equal(location.searchParams.getAll('author').length,2);
+assert.equal(location.searchParams.getAll('author-id').length,2);
 assert.equal(location.searchParams.get('p'),'c');
 restoreUrl(new URLSearchParams('q=Ada&p=a'));
 assert.equal(searchScope,'all'); assert.equal(query,'Ada'); assert.equal(selectedPaper,0);
@@ -191,7 +289,7 @@ X=null; restoreUrl(new URLSearchParams('scope=authors&author=Ada+Lovelace'));
 assert.match(text(panel),/Loading author/); assert.equal(matchSet,null);
 selectAuthor('Grace Hopper'); detailsLoaded(details);
 assert.deepEqual([...matchSet],[1,2]);
-assert.equal(selectedAuthors[0],'Grace Hopper');
+assert.equal(selectedAuthors[0],'name:grace hopper');
 X=null; detailsFailed(new Error('network failed'));
 assert.match(text(panel),/Unable to load author/); assert.doesNotMatch(hits.textContent,/0 match/);
 ''')
@@ -209,7 +307,7 @@ assert.equal(calls.filter(c=>c[0]==='relayout').length,0);
 selectPaper(0); search.value='grace'; search.listeners.input();
 await new Promise(resolve=>setTimeout(resolve,180));
 assert.equal(panelView,'authors'); assert.equal(selectedPaper,-1);
-assert.equal(selectedAuthors[0],'Ada Lovelace'); assert.equal(matchSet.size,2);
+assert.equal(selectedAuthors[0],'name:ada lovelace'); assert.equal(matchSet.size,2);
 assert.ok(button('Add Grace Hopper'));
 })().catch(err=>{console.error(err);process.exitCode=1;});
 ''')

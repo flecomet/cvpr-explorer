@@ -50,6 +50,7 @@
   header a:hover { text-decoration: underline; }
   #filters { padding: 8px 16px; border-bottom: 1px solid var(--border); }
   .filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 3px 0; }
+  .filter-row[hidden] { display: none; }
   .filter-row > span { min-width: 100px; font-size: 13px; color: var(--muted); }
   .filter-row button { font-size: 12px; padding: 4px 9px; border-radius: 999px; }
   .filter-row button[aria-pressed="true"] { border-color: var(--accent); background: var(--chip); }
@@ -114,6 +115,7 @@
 <div id="filters" aria-label="Paper filters">
   <div id="location-filters" class="filter-row" role="group" aria-label="Location"></div>
   <div id="presentation-filters" class="filter-row" role="group" aria-label="Presentation"></div>
+  <div id="track-filters" class="filter-row" role="group" aria-label="Track"></div>
   <button id="clear-filters" type="button">Clear filters</button>
   <span id="filter-count" aria-live="polite"></span>
 </div>
@@ -146,6 +148,7 @@ let searchScope = "all";
 let selectedAuthors = [];
 const selectedSites = new Set();
 const selectedDecisions = new Set();
+const selectedTracks = new Set();
 let authorIndex = new Map();
 let detailsError = null;
 let searchTimer;
@@ -215,10 +218,11 @@ function recolor() {
 
 function matchesCategories(i) {
   return (!selectedSites.size || selectedSites.has(D.sites[D.site[i]])) &&
-    (!selectedDecisions.size || selectedDecisions.has(D.decisions[D.dec[i]]));
+    (!selectedDecisions.size || selectedDecisions.has(D.decisions[D.dec[i]])) &&
+    (!selectedTracks.size || selectedTracks.has(D.tracks[D.track[i]]));
 }
 function renderFilters() {
-  const row = (id, label, values, selection) => {
+  const row = (id, label, values, selection, emptyLabel = "None") => {
     const button = (text, value) => {
       const b = el("button", { type: "button", textContent: text });
       b.setAttribute("aria-pressed", String(value === null ? !selection.size : selection.has(value)));
@@ -231,11 +235,13 @@ function renderFilters() {
       return b;
     };
     $(id).replaceChildren(el("span", {}, label), button("All", null),
-      ...values.map(value => button(value || "None", value)));
+      ...values.map(value => button(value || emptyLabel, value)));
   };
   row("location-filters", "Location", D.sites, selectedSites);
   row("presentation-filters", "Presentation", D.decisions, selectedDecisions);
-  $("clear-filters").disabled = !selectedSites.size && !selectedDecisions.size;
+  row("track-filters", "Track", D.tracks.filter(Boolean).concat(D.tracks.includes("") ? [""] : []), selectedTracks, "Unknown");
+  $("track-filters").hidden = D.tracks.length < 2;
+  $("clear-filters").disabled = !selectedSites.size && !selectedDecisions.size && !selectedTracks.size;
 }
 function filtersChanged() {
   renderFilters();
@@ -335,7 +341,7 @@ function refreshHighlight() {
   if (matchSet && activeCluster !== null) idx = [...matchSet].filter(i => D.c[i] === activeCluster);
   else if (matchSet) idx = [...matchSet];
   else if (activeCluster !== null) idx = clusterMembers(activeCluster);
-  if (selectedSites.size || selectedDecisions.size) {
+  if (selectedSites.size || selectedDecisions.size || selectedTracks.size) {
     idx = (idx === null ? D.x.map((_, i) => i) : idx).filter(matchesCategories);
   }
   $("filter-count").textContent = idx === null ? "All papers visible" : idx.length + " of " + D.x.length + " papers highlighted";
@@ -630,7 +636,7 @@ function renderPaper() {
   const isSaved = saved.includes(D.id[i]);
   const badges = el("div", { className: "badges" },
     D.decisions.length > 1 ? el("span", { className: "badge" }, D.decisions[D.dec[i]]) : null,
-    D.tracks.length > 1 ? el("span", { className: "badge" }, D.tracks[D.track[i]]) : null,
+    D.tracks.length > 1 ? el("span", { className: "badge" }, D.tracks[D.track[i]] || "Unknown") : null,
     D.sites[D.site[i]] ? el("span", { className: "badge" }, D.sites[D.site[i]]) : null,
     D.areas[D.area[i]] ? el("span", { className: "badge" }, prettyArea(D.areas[D.area[i]])) : null);
 
@@ -743,7 +749,7 @@ function syncUrl() {
   set("p", selectedPaper >= 0 ? D.id[selectedPaper] : "");
   set("c", activeCluster !== null && selectedPaper < 0 ? String(activeCluster) : "");
   u.searchParams.delete("color");
-  for (const [key, selection] of [["location", selectedSites], ["presentation", selectedDecisions]]) {
+  for (const [key, selection] of [["location", selectedSites], ["presentation", selectedDecisions], ["track", selectedTracks]]) {
     u.searchParams.delete(key);
     selection.forEach(value => u.searchParams.append(key, value));
   }
@@ -761,7 +767,7 @@ function wire() {
   });
   $("search-scope").addEventListener("change", () => setSearchScope($("search-scope").value));
   $("clear-filters").addEventListener("click", () => {
-    selectedSites.clear(); selectedDecisions.clear(); filtersChanged();
+    selectedSites.clear(); selectedDecisions.clear(); selectedTracks.clear(); filtersChanged();
   });
   $("btn-topics").addEventListener("click", clearSelection);
   $("btn-saved").addEventListener("click", showSaved);
@@ -794,9 +800,10 @@ function buildHaystack() {
 
 function restoreUrl(params) {
   restoringUrl = true;
-  selectedSites.clear(); selectedDecisions.clear();
+  selectedSites.clear(); selectedDecisions.clear(); selectedTracks.clear();
   params.getAll("location").filter(value => D.sites.includes(value)).forEach(value => selectedSites.add(value));
   params.getAll("presentation").filter(value => D.decisions.includes(value)).forEach(value => selectedDecisions.add(value));
+  params.getAll("track").filter(value => D.tracks.includes(value)).forEach(value => selectedTracks.add(value));
   renderFilters();
   exitAuthorMode();
   activeCluster = null;

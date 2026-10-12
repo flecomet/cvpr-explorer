@@ -117,6 +117,53 @@ plotEl._fullLayout={xaxis:{range:[-1,8]},yaxis:{range:[-1,8]}};
     assert result.returncode == 0, result.stderr
 
 
+def test_track_filter_intersects_search_location_and_presentation(tmp_path):
+    run_author_js(tmp_path, r'''
+D.tracks=['Main','E&D','Position','']; D.track=[0,1,2,3];
+D.sites=['Atlanta','Paris']; D.site=[0,0,1,0];
+D.decisions=['oral','poster']; D.dec=[0,1,0,0];
+renderFilters();
+const trackButton = label => descendants($('track-filters')).find(e=>e.tagName==='BUTTON' && text(e)===label);
+assert.ok(trackButton('E&D'), 'track choices must be rendered');
+trackButton('E&D').click();
+assert.deepEqual(calls.filter(c=>c[0]==='restyle').at(-1)[2].selectedpoints,[[1]]);
+trackButton('Position').click();
+assert.deepEqual(calls.filter(c=>c[0]==='restyle').at(-1)[2].selectedpoints,[[1,2]]);
+selectedSites.add('Atlanta'); filtersChanged();
+assert.deepEqual(calls.filter(c=>c[0]==='restyle').at(-1)[2].selectedpoints,[[1]]);
+selectedDecisions.add('oral'); filtersChanged();
+assert.deepEqual(calls.filter(c=>c[0]==='restyle').at(-1)[2].selectedpoints,[[]]);
+selectedSites.clear(); selectedDecisions.clear();
+setQuery('Third');
+assert.deepEqual(calls.filter(c=>c[0]==='restyle').at(-1)[2].selectedpoints,[[2]]);
+trackButton('All').click();
+assert.deepEqual(calls.filter(c=>c[0]==='restyle').at(-1)[2].selectedpoints,[[2]]);
+setQuery('');
+trackButton('Unknown').click();
+assert.deepEqual(calls.filter(c=>c[0]==='restyle').at(-1)[2].selectedpoints,[[3]]);
+''')
+
+
+def test_track_filter_restores_shared_links_and_clears_with_other_filters(tmp_path):
+    run_author_js(tmp_path, r'''
+D.tracks=['Main','E&D','Position','']; D.track=[0,1,2,3];
+D.sites=['Atlanta']; D.site=[0,0,0,0];
+wire();
+restoreUrl(new URLSearchParams('track=E%26D&track=Position&track=invalid&location=Atlanta&presentation=poster'));
+assert.deepEqual([...location.searchParams.getAll('track')],['E&D','Position']);
+assert.deepEqual(calls.filter(c=>c[0]==='restyle').at(-1)[2].selectedpoints,[[1,2]]);
+assert.equal($('clear-filters').disabled,false);
+$('clear-filters').click();
+assert.deepEqual([...location.searchParams.getAll('track')],[]);
+assert.deepEqual([...location.searchParams.getAll('location')],[]);
+assert.deepEqual([...location.searchParams.getAll('presentation')],[]);
+assert.equal($('clear-filters').disabled,true);
+restoreUrl(new URLSearchParams('track='));
+assert.deepEqual([...location.searchParams.getAll('track')],['']);
+assert.deepEqual(calls.filter(c=>c[0]==='restyle').at(-1)[2].selectedpoints,[[3]]);
+''')
+
+
 def test_author_index(tmp_path):
     run_author_js(tmp_path, r'''
 assert.equal(normalizeAuthor('  E\u0301mile   TEST '), 'émile test');

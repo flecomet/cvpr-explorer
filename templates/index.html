@@ -49,6 +49,7 @@
   header a { color: var(--muted); font-size: 13px; text-decoration: none; }
   header a:hover { text-decoration: underline; }
   #filters { padding: 8px 16px; border-bottom: 1px solid var(--border); }
+  #filters[hidden] { display: none; }
   .filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 3px 0; }
   .filter-row[hidden] { display: none; }
   .filter-row > span { min-width: 100px; font-size: 13px; color: var(--muted); }
@@ -240,7 +241,10 @@ function renderFilters() {
   row("location-filters", "Location", D.sites, selectedSites);
   row("presentation-filters", "Presentation", D.decisions, selectedDecisions);
   row("track-filters", "Track", D.tracks.filter(Boolean).concat(D.tracks.includes("") ? [""] : []), selectedTracks, "Unknown");
+  $("location-filters").hidden = D.sites.length < 2;
+  $("presentation-filters").hidden = D.decisions.length < 2;
   $("track-filters").hidden = D.tracks.length < 2;
+  $("filters").hidden = D.sites.length < 2 && D.decisions.length < 2 && D.tracks.length < 2;
   $("clear-filters").disabled = !selectedSites.size && !selectedDecisions.size && !selectedTracks.size;
 }
 function filtersChanged() {
@@ -666,7 +670,7 @@ function renderPaper() {
       authors.append(b);
     });
     nodes.push(authors, actions);
-    if (paperAuthors(i).some(author => !author.id)) nodes.push(el("p", { className: "hint" }, "Authors without a NeurIPS account ID are grouped by name; identity not verified."));
+    if (paperAuthors(i).some(author => !author.id)) nodes.push(el("p", { className: "hint" }, "Authors without a verified identifier are grouped by name; identity not verified."));
     if (X.tldr[i]) nodes.push(el("p", { className: "tldr" }, X.tldr[i]));
     nodes.push(el("p", { className: "abstract" }, X.abstract[i]));
     if (X.kw[i].length) {

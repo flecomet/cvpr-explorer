@@ -19,3 +19,11 @@ CSV_NAME = "cvpr2026-saved.csv"
 # CVF open-access site, read by scrape.py.
 CVF_URL = "https://openaccess.thecvf.com"
 LISTING_URL = f"{CVF_URL}/CVPR2026?day=all"
+
+# Official conference program pages, used to enrich presentation types. Papers absent
+# from these special-presentation lists use DEFAULT_PRESENTATION.
+PRESENTATION_URLS = {
+    "oral": f"https://cvpr.thecvf.com/virtual/{YEAR}/events/Oral",
+    "spotlight": f"https://cvpr.thecvf.com/virtual/{YEAR}/events/Highlights{YEAR}",
+}
+DEFAULT_PRESENTATION = "poster"

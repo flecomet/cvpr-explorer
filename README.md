@@ -28,6 +28,9 @@ characteristic terms. Grey points are papers that fit no cluster.
 - **Search** matches titles and abstracts and dims every other point, so the shape of the map
   stays visible. The query is stored in the URL, so
   [`?q=diffusion`](https://flecomet.github.io/cvpr-explorer/?q=diffusion) is a shareable link.
+- **Presentation filter** separates the 141 oral, 575 spotlight and 3352 poster papers in the
+  explorer. The official program calls spotlight papers "Highlights". Every oral paper also has
+  a poster presentation, but appears as oral in this filter.
 - **Click** a point to show the title, authors and abstract in the side panel, with a link to the PDF.
 - **Scroll and drag** to zoom and pan.
 - **Topic names** are drawn on the map, and more appear as you zoom in.
@@ -68,7 +71,7 @@ The pipeline is offline and the site is static.
 
 | Step | Script | Output |
 |------|--------|--------|
-| Scrape titles, authors, abstracts, PDF links | `scrape.py` | `data/cvpr_2026_papers.json` |
+| Scrape paper metadata and enrich presentation types from the official program | `scrape.py` | `data/cvpr_2026_papers.json` |
 | Embed abstracts with SPECTER2 | `embed.py` | `data/cvpr_2026_specter2.npy` |
 | UMAP to 2D, HDBSCAN clusters, c-TF-IDF labels, nearest neighbours | `layout.py` | `data/cvpr_2026_layout.json` |
 | Merge into the site payload | `build_site.py` | `site/data.json`, `site/details.json`, `site/index.html` |

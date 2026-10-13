@@ -2,14 +2,17 @@
 
 Writes config.PAPERS_PATH: a list of {id, title, authors, abstract, pdf_link, forum_link,
 keywords, tldr, area, decision, track, site} in listing order. CVF publishes no keywords,
-TL;DR, primary area or presentation type, so those fields stay empty and decision is "other".
+TL;DR, primary area or presentation type. Official conference program pages supply oral and
+spotlight assignments; every remaining paper uses config.DEFAULT_PRESENTATION.
 """
+import argparse
 import json
 import os
 import re
 import sys
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
 
@@ -82,6 +85,74 @@ def parse_paper_html(html, url):
     return to_record(title, authors, abstract, urljoin(url, pdf_a["href"]))
 
 
+def normalize_match_text(value):
+    """Normalize typography while retaining the words used to identify a paper."""
+    value = unicodedata.normalize("NFKC", value).casefold()
+    value = re.sub(r"[‐‑‒–—−]", "-", value)
+    return " ".join(re.sub(r"[^\w]+", " ", value).split())
+
+
+def parse_presentation_html(html):
+    """Return title and ordered authors from a CVPR program event page."""
+    soup = BeautifulSoup(html, "html.parser")
+    entries = []
+    for card in soup.select(".event-card"):
+        title = card.select_one("h3.event-title a")
+        authors = card.select_one(".event-speakers")
+        if title is not None:
+            entries.append({
+                "title": " ".join(title.get_text(" ", strip=True).split()),
+                "authors": " ".join(authors.get_text(" ", strip=True).split()) if authors else "",
+            })
+    return entries
+
+
+def fetch_presentations():
+    listings = {}
+    for presentation, url in config.PRESENTATION_URLS.items():
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        listings[presentation] = parse_presentation_html(resp.text)
+        if not listings[presentation]:
+            raise ValueError(f"no {presentation} papers found at {url}")
+    return listings
+
+
+def enrich_presentations(papers, listings):
+    """Assign configured presentation types by title, with ordered authors as fallback."""
+    by_title = {}
+    by_authors = {}
+    for index, paper in enumerate(papers):
+        by_title.setdefault(normalize_match_text(paper["title"]), []).append(index)
+        by_authors.setdefault(normalize_match_text(paper["authors"]), []).append(index)
+
+    assigned = {}
+    for presentation, entries in listings.items():
+        seen = set()
+        for entry in entries:
+            matches = by_title.get(normalize_match_text(entry["title"]), [])
+            if len(matches) != 1 and entry["authors"]:
+                matches = by_authors.get(normalize_match_text(entry["authors"]), [])
+            if len(matches) != 1:
+                raise ValueError(
+                    f"{presentation} paper did not match one record: {entry['title']!r}"
+                )
+            index = matches[0]
+            if index in seen:
+                raise ValueError(f"duplicate {presentation} paper: {entry['title']!r}")
+            if index in assigned:
+                raise ValueError(
+                    f"paper has both {assigned[index]} and {presentation} presentations: "
+                    f"{papers[index]['title']!r}"
+                )
+            seen.add(index)
+            assigned[index] = presentation
+
+    for index, paper in enumerate(papers):
+        paper["decision"] = assigned.get(index, config.DEFAULT_PRESENTATION)
+    return {presentation: len(entries) for presentation, entries in listings.items()}
+
+
 def fetch_with_retry(href):
     url = config.CVF_URL + href
     delay = 1.0
@@ -99,7 +170,7 @@ def fetch_with_retry(href):
     return url, {"__error__": str(last_exc)}
 
 
-def main():
+def scrape_all():
     print(f"Fetching listing: {config.LISTING_URL}")
     hrefs = fetch_listing_hrefs()
     n_expected = len(hrefs)
@@ -132,6 +203,31 @@ def main():
 
     # Listing order, not id order: the committed embeddings follow this order.
     papers = [results_by_href[href] for href in hrefs]
+
+    return papers
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--enrich-presentations",
+        action="store_true",
+        help="update presentation types in the committed paper data without rescraping papers",
+    )
+    args = parser.parse_args()
+
+    if args.enrich_presentations:
+        with open(config.PAPERS_PATH, encoding="utf-8") as f:
+            papers = json.load(f)
+    else:
+        papers = scrape_all()
+
+    print("Fetching presentation types from the official conference program.")
+    counts = enrich_presentations(papers, fetch_presentations())
+    counts[config.DEFAULT_PRESENTATION] = sum(
+        paper["decision"] == config.DEFAULT_PRESENTATION for paper in papers
+    )
+    print("Presentation types: " + ", ".join(f"{key}={value}" for key, value in counts.items()))
 
     assert len({p["id"] for p in papers}) == len(papers), "duplicate paper ids"
     for p in papers:
